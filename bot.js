@@ -1,114 +1,17 @@
 require('dotenv').config();
-const TelegramBot = require('node-telegram-bot-api');
+const { Telegraf, Markup } = require('telegraf');
 const { gerarArtigo } = require('./services/ai');
 const { publicarNoGitHub } = require('./services/github');
 
-// Seu Token recebido do BotFather
 const token = process.env.TELEGRAM_BOT_TOKEN;
+const bot = new Telegraf(token);
 
-// Inicia o bot com polling para escutar os comandos e botões continuamente
-const bot = new TelegramBot(token, { polling: true });
-
-// Objeto para armazenar artigos na memória temporária aguardando aprovação
+// Memória temporária para artigos pendentes
 const artigosPendentes = {};
 
-console.log("🤖 Publicador Bot iniciado!");
+console.log("🤖 Publicador Bot iniciado com sucesso usando Telegraf!");
 
-// Comando principal para iniciar a geração
-bot.onText(/\/gerar (.+)/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const tema = match[1];
-
-    bot.sendMessage(chatId, `⏳ Gerando artigo sobre: *${tema}*...\nIsso pode levar alguns segundos.`, { parse_mode: 'Markdown' });
-
-    try {
-        const artigo = await gerarArtigo(tema);
-        
-        // Salva na "memória" com um ID único (usando timestamp)
-        const artigoId = Date.now().toString();
-        artigosPendentes[artigoId] = artigo;
-
-        const previa = artigo.conteudo.substring(0, 800) + "\n\n... (cortado para visualização)";
-
-        const opcoesBotoes = {
-            reply_markup: {
-                inline_keyboard: [
-                    [
-                        { text: '✅ Aprovar e Publicar', callback_data: `aprovar_${artigoId}` },
-                        { text: '❌ Rejeitar', callback_data: `rejeitar_${artigoId}` }
-                    ]
-                ]
-            }
-        };
-
-        bot.sendMessage(chatId, `📝 *Artigo Gerado!* \n\n*Tema:* ${tema}\n\n*Prévia:*\n${previa}\n\nO que deseja fazer?`, { 
-            parse_mode: 'Markdown',
-            ...opcoesBotoes 
-        });
-
-    } catch (error) {
-        bot.sendMessage(chatId, "❌ Erro ao gerar o artigo. Verifique os logs.");
-    }
-});
-
-// Listener para quando o usuário clicar nos botões (Aprovar / Rejeitar)
-bot.on('callback_query', async (query) => {
-    const chatId = query.message.chat.id;
-    const messageId = query.message.message_id;
-    const data = query.data; // ex: 'aprovar_123456789'
-
-    const acao = data.split('_')[0];
-    const artigoId = data.split('_')[1];
-
-    const artigo = artigosPendentes[artigoId];
-
-    if (!artigo) {
-        return bot.sendMessage(chatId, "⚠️ Este artigo não está mais na memória (ou o bot foi reiniciado). Gere novamente.");
-    }
-
-    if (acao === 'rejeitar') {
-        delete artigosPendentes[artigoId];
-        // Remove os botões da mensagem e avisa
-        bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
-        bot.sendMessage(chatId, "🗑️ Artigo *Rejeitado* e descartado.", { parse_mode: 'Markdown' });
-    }
-
-    if (acao === 'aprovar') {
-        bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: messageId });
-        bot.sendMessage(chatId, "🚀 Publicando artigo no GitHub...");
-
-        try {
-            // AQUI VOCÊ CONFIGURA SEUS SITES:
-            // Para simplificar, vou usar variáveis de ambiente para o repositório principal
-            // Mas você pode colocar lógica aqui para perguntar "Em qual site quer publicar?"
-            
-            const donoRepo = process.env.GITHUB_REPO_OWNER;
-            const nomeRepo = process.env.GITHUB_REPO_NAME;
-            const pastaPosts = process.env.GITHUB_POSTS_FOLDER || "src/content/blog"; // Padrão comum em Astro/Nextjs
-            
-            if (!donoRepo || !nomeRepo) {
-                bot.sendMessage(chatId, "⚠️ Erro: Variáveis do GitHub não estão configuradas corretamente.");
-                return;
-            }
-
-            const resultado = await publicarNoGitHub(artigo.conteudo, donoRepo, nomeRepo, pastaPosts);
-            
-            delete artigosPendentes[artigoId]; // Limpa da memória
-
-            bot.sendMessage(chatId, `✅ *Artigo Publicado com Sucesso!*\n\nO GitHub recebeu o arquivo e a Vercel já deve iniciar o Deploy em breve.\n\n🔗 [Ver arquivo no GitHub](${resultado.url})`, { 
-                parse_mode: 'Markdown',
-                disable_web_page_preview: true
-            });
-
-        } catch (error) {
-            bot.sendMessage(chatId, `❌ Erro ao publicar: ${error.message}`);
-        }
-    }
-});
-
-// Mensagem de boas vindas e instruções
-bot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
+bot.start((ctx) => {
     const instrucoes = `
 👋 Olá! Eu sou o *Publicador Bot*.
 
@@ -119,7 +22,91 @@ Para criar um artigo, digite:
 \`/gerar Seu Tema Aqui\`
 
 Exemplo:
-\`/gerar Os benefícios da inteligência artificial no marketing de conteúdo\`
+\`/gerar Os benefícios da inteligência artificial no marketing\`
     `;
-    bot.sendMessage(chatId, instrucoes, { parse_mode: 'Markdown' });
+    ctx.reply(instrucoes, { parse_mode: 'Markdown' });
 });
+
+bot.command('gerar', async (ctx) => {
+    // Pega o texto depois do /gerar
+    const tema = ctx.message.text.replace('/gerar', '').trim();
+    
+    if (!tema) {
+        return ctx.reply("⚠️ Você esqueceu de dizer o tema. Exemplo: /gerar Vantagens do Bitcoin");
+    }
+
+    ctx.reply(`⏳ Gerando artigo sobre: *${tema}*...\nIsso pode levar alguns segundos.`, { parse_mode: 'Markdown' });
+
+    try {
+        const artigo = await gerarArtigo(tema);
+        
+        const artigoId = Date.now().toString();
+        artigosPendentes[artigoId] = artigo;
+
+        const previa = artigo.conteudo.substring(0, 800) + "\n\n... (cortado para visualização)";
+
+        await ctx.reply(`📝 *Artigo Gerado!* \n\n*Tema:* ${tema}\n\n*Prévia:*\n${previa}\n\nO que deseja fazer?`, {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Aprovar e Publicar', `aprovar_${artigoId}`)],
+                [Markup.button.callback('❌ Rejeitar', `rejeitar_${artigoId}`)]
+            ])
+        });
+
+    } catch (error) {
+        console.error(error);
+        ctx.reply("❌ Erro ao gerar o artigo. Verifique os logs.");
+    }
+});
+
+bot.on('callback_query', async (ctx) => {
+    const data = ctx.callbackQuery.data; // 'aprovar_123'
+    const acao = data.split('_')[0];
+    const artigoId = data.split('_')[1];
+
+    const artigo = artigosPendentes[artigoId];
+
+    if (!artigo) {
+        return ctx.reply("⚠️ Este artigo não está mais na memória (ou o bot foi reiniciado). Gere novamente.");
+    }
+
+    if (acao === 'rejeitar') {
+        delete artigosPendentes[artigoId];
+        await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+        return ctx.reply("🗑️ Artigo *Rejeitado* e descartado.", { parse_mode: 'Markdown' });
+    }
+
+    if (acao === 'aprovar') {
+        await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+        await ctx.reply("🚀 Publicando artigo no GitHub...");
+
+        try {
+            const donoRepo = process.env.GITHUB_REPO_OWNER;
+            const nomeRepo = process.env.GITHUB_REPO_NAME || "publicador"; // Fallback
+            const pastaPosts = process.env.GITHUB_POSTS_FOLDER || "src/content/blog";
+            
+            if (!donoRepo) {
+                return ctx.reply("⚠️ Erro: Variável GITHUB_REPO_OWNER não configurada.");
+            }
+
+            const resultado = await publicarNoGitHub(artigo.conteudo, donoRepo, nomeRepo, pastaPosts);
+            
+            delete artigosPendentes[artigoId];
+
+            ctx.reply(`✅ *Artigo Publicado com Sucesso!*\n\nO repositório ${nomeRepo} foi atualizado. Se ele estiver na Vercel, o deploy automático já deve começar.\n\n🔗 [Ver arquivo no GitHub](${resultado.url})`, { 
+                parse_mode: 'Markdown',
+                disable_web_page_preview: true
+            });
+
+        } catch (error) {
+            console.error(error);
+            ctx.reply(`❌ Erro ao publicar: ${error.message}`);
+        }
+    }
+});
+
+bot.launch();
+
+// Enable graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
